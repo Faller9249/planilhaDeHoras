@@ -1,0 +1,1167 @@
+// Manter apenas:
+import { useState, ChangeEvent } from 'react';
+import { Download, Calendar, Clock, User, Upload, FileText, Trash2, ArrowUpDown, ArrowUp, ArrowDown, HelpCircle, X } from 'lucide-react';
+import { extractTextFromPDF } from './utils/pdf-config';
+import Papa from 'papaparse';
+import ExcelJS from 'exceljs';
+// Definir tipos TypeScript
+interface Atividade {
+  data: string;
+  inicio: string;
+  duracao: string;
+  tarefa: string;
+}
+
+interface AtividadeFormatada {
+  Colaborador: string;
+  'Data Início': string;
+  'Hora inicio': string;
+  'Hora fim': string;
+  'Tempo': string;
+  'Tarefa': string;
+}
+
+type OrdenacaoColuna = 'data' | 'hora' | 'tempo' | 'tarefa' | null;
+type DirecaoOrdenacao = 'asc' | 'desc';
+
+const ActivitiesListed = () => {
+  const [atividades, setAtividades] = useState<AtividadeFormatada[]>([]);
+  const [filtroData, setFiltroData] = useState<string>('');
+  const [filtroTarefa, setFiltroTarefa] = useState<string>('');
+  const [processando, setProcessando] = useState<boolean>(false);
+  const [arquivosCarregados, setArquivosCarregados] = useState<string[]>([]);
+  const [colunaOrdenacao, setColunaOrdenacao] = useState<OrdenacaoColuna>('data');
+  const [direcaoOrdenacao, setDirecaoOrdenacao] = useState<DirecaoOrdenacao>('asc');
+  const [mostrarModalAjuda, setMostrarModalAjuda] = useState<boolean>(false);
+
+  // Funções auxiliares
+  const timeToMinutes = (timeStr: string): number => {
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return hours * 60 + minutes;
+  };
+
+  const minutesToTime = (minutes: number): string => {
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    return `${h}:${m.toString().padStart(2, '0')}`;
+  };
+
+  const calcularHoraFim = (horaInicio: string, duracao: string): string => {
+    const inicioMinutos = timeToMinutes(horaInicio);
+    const duracaoMinutos = timeToMinutes(duracao);
+    const fimMinutos = inicioMinutos + duracaoMinutos;
+    return minutesToTime(fimMinutos);
+  };
+
+  const processarPDFsTMetric = async (files: File[]) => {
+    setProcessando(true);
+    const novasAtividades: Atividade[] = [];
+    const nomesArquivos: string[] = [];
+
+    try {
+      for (const file of files) {
+        nomesArquivos.push(file.name);
+
+        const content = await extractTextFromPDF(file);
+
+        console.log('=== CONTEÚDO EXTRAÍDO ===');
+        console.log(content);
+
+        // Encontrar período
+        const periodoMatch = content.match(/Período:\s*(\d+)\s+(\w+)\.\s+(\d+)/);
+        let mesAtual = 9;
+        let anoAtual = 2025;
+
+        if (periodoMatch) {
+          const meses: { [key: string]: number } = {
+            'jan': 1, 'fev': 2, 'mar': 3, 'abr': 4, 'mai': 5, 'jun': 6,
+            'jul': 7, 'ago': 8, 'set': 9, 'out': 10, 'nov': 11, 'dez': 12
+          };
+          mesAtual = meses[periodoMatch[2].toLowerCase().substring(0, 3)] || 9;
+          anoAtual = parseInt(periodoMatch[3]);
+        }
+
+        console.log(`Período: Mês ${mesAtual}, Ano ${anoAtual}`);
+
+        // Padrão para capturar atividades: DD - ORDEM - Descrição Não/Sim Projeto H:MM
+        const regexAtividade = /(\d{2})\s*-\s*(\d{2})\s*-\s*(.+?)\s+(Não|Sim)\s+(.+?)\s+(\d+:\d+)/g;
+
+        const atividadesPorDia: { [key: string]: string } = {};
+        let totalEncontradas = 0;
+
+        // Usar matchAll para pegar TODAS as ocorrências
+        const matches = content.matchAll(regexAtividade);
+
+        for (const match of matches) {
+          const dia = match[1];
+          const sequencia = match[2];
+          const descricao = match[3];
+          const faturavel = match[4]; // "Não" ou "Sim"
+          const projeto = match[5];
+          const duracao = match[6];
+
+          totalEncontradas++;
+          console.log(`Encontrada atividade: Dia ${dia}, Seq ${sequencia}, Desc "${descricao}", Faturável: ${faturavel}, Projeto "${projeto}", Duração ${duracao}`);
+
+          // Garantir formato com 2 dígitos
+          const diaFormatado = dia.padStart(2, '0');
+          const sequenciaFormatada = sequencia.padStart(2, '0');
+
+          // Limpar descrição removendo espaços extras
+          const descricaoLimpa = descricao
+            .trim()
+            .replace(/\s+/g, ' ')  // Substituir múltiplos espaços por um só
+            .replace(/\s*-\s*$/, ''); // Remover traço final se houver
+
+          // Criar tarefa no formato: DD - DD - Descrição
+          const tarefaFormatada = `${diaFormatado} - ${sequenciaFormatada} - ${descricaoLimpa}`;
+
+          const data = `${anoAtual}-${mesAtual.toString().padStart(2, '0')}-${diaFormatado}`;
+
+          // Inicializar hora do dia
+          if (!atividadesPorDia[data]) {
+            atividadesPorDia[data] = '8:00';
+          }
+
+          const horaInicio = atividadesPorDia[data];
+
+          novasAtividades.push({
+            data,
+            inicio: horaInicio,
+            duracao: duracao.trim(),
+            tarefa: tarefaFormatada
+          });
+
+          // Atualizar hora acumulada do dia
+          atividadesPorDia[data] = calcularHoraFim(horaInicio, duracao.trim());
+
+          console.log(`✓ ${totalEncontradas}. [${tarefaFormatada}] | Duração: ${duracao}`);
+        }
+
+        console.log(`\nTotal de atividades encontradas: ${totalEncontradas}`);
+
+        // Método alternativo caso o regex principal não encontre nada
+        if (totalEncontradas === 0) {
+          console.log('Tentando método alternativo linha por linha...');
+
+          const linhas = content.split('\n');
+
+          for (const linha of linhas) {
+            // Procurar padrão DD - DD - no início da linha
+            const matchLinha = linha.match(/^(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(.+)/);
+
+            if (matchLinha) {
+              const [, dia, sequencia, resto] = matchLinha;
+
+              // Procurar duração na linha
+              const tempoMatch = resto.match(/(\d+:\d+)(?:\s|$)/);
+
+              if (tempoMatch) {
+                const duracao = tempoMatch[1];
+
+                // Limpar descrição: remover "Não/Sim Projeto Tempo"
+                let descricao = resto
+                  .replace(/\s+(Não|Sim)\s+.+?\s+\d+:\d+.*$/, '')
+                  .trim()
+                  .replace(/\s+/g, ' ');
+
+                // Garantir formato com 2 dígitos
+                const diaFormatado = dia.padStart(2, '0');
+                const sequenciaFormatada = sequencia.padStart(2, '0');
+
+                // Criar tarefa no formato: DD - DD - Descrição
+                const tarefaFormatada = `${diaFormatado} - ${sequenciaFormatada} - ${descricao}`;
+
+                const data = `${anoAtual}-${mesAtual.toString().padStart(2, '0')}-${diaFormatado}`;
+
+                if (!atividadesPorDia[data]) {
+                  atividadesPorDia[data] = '8:00';
+                }
+
+                const horaInicio = atividadesPorDia[data];
+
+                novasAtividades.push({
+                  data,
+                  inicio: horaInicio,
+                  duracao: duracao,
+                  tarefa: tarefaFormatada
+                });
+
+                atividadesPorDia[data] = calcularHoraFim(horaInicio, duracao);
+
+                totalEncontradas++;
+                console.log(`✓ ALT ${totalEncontradas}. [${tarefaFormatada}] | Duração: ${duracao}`);
+              }
+            }
+          }
+        }
+      }
+
+      // Ordenar por data e hora
+      novasAtividades.sort((a, b) => {
+        if (a.data !== b.data) return a.data.localeCompare(b.data);
+        return a.inicio.localeCompare(b.inicio);
+      });
+
+      // Converter para formato final
+      const atividadesFormatadas: AtividadeFormatada[] = novasAtividades.map(item => ({
+        Colaborador: 'Eduardo Faller',
+        'Data Início': item.data,
+        'Hora inicio': item.inicio,
+        'Hora fim': calcularHoraFim(item.inicio, item.duracao),
+        'Tempo': item.duracao,
+        'Tarefa': item.tarefa
+      }));
+
+      setAtividades(prev => [...prev, ...atividadesFormatadas]);
+      setArquivosCarregados(prev => [...prev, ...nomesArquivos]);
+
+      if (atividadesFormatadas.length === 0) {
+        alert('Nenhuma atividade foi encontrada. Verifique o console (F12) para debug.');
+      } else {
+        alert(`✓ ${atividadesFormatadas.length} atividades extraídas com sucesso!`);
+      }
+
+    } catch (error) {
+      console.error('Erro ao processar PDFs:', error);
+      alert('Erro ao processar os arquivos. Detalhes no console (F12).');
+    } finally {
+      setProcessando(false);
+    }
+  };
+
+  // Adicione esta função após a função processarPDFsTMetric
+
+  const processarExcelTMetric = async (files: File[]) => {
+    setProcessando(true);
+    const novasAtividades: Atividade[] = [];
+    const nomesArquivos: string[] = [];
+
+    try {
+      // Importar bibliotecas necessárias
+
+      for (const file of files) {
+        nomesArquivos.push(file.name);
+
+        // Ler arquivo CSV
+        const fileContent = await file.text();
+
+        const resultado = Papa.parse(fileContent, {
+          header: true,
+          skipEmptyLines: true,
+          dynamicTyping: false
+        });
+
+        const dados = resultado.data as any[];
+
+        console.log('=== DADOS DO CSV ===');
+        console.log(dados);
+
+        // Encontrar colunas de datas (formato YYYY-MM-DD)
+        const colunasData = Object.keys(dados[0] || {}).filter(col =>
+          /^\d{4}-\d{2}-\d{2}$/.test(col)
+        );
+
+        console.log('Colunas de data encontradas:', colunasData);
+
+        // Processar cada dia
+        for (const data of colunasData) {
+          console.log(`\n========== Processando dia ${data} ==========`);
+
+          // Extrair dia do mês da data (ex: 2025-09-01 -> 01)
+          const diaDoMes = data.split('-')[2];
+
+          // Primeira passagem: coletar etiquetas de início e almoço APENAS para este dia
+          let horaInicioDia = '8:00'; // Padrão
+          let horaAlmoco: string | null = null;
+
+          for (const linha of dados) {
+            const duracaoDoDia = linha[data];
+
+            // Verificar se essa linha tem atividade neste dia específico
+            if (!duracaoDoDia || duracaoDoDia.trim() === '' || duracaoDoDia === '-') continue;
+
+            const etiqueta = (linha['Etiquetas'] || '').toLowerCase();
+
+            // Procurar início do dia
+            const matchInicio = etiqueta.match(/inicio[:\s]+(\d{1,2}):(\d{2})/);
+            if (matchInicio) {
+              horaInicioDia = `${matchInicio[1]}:${matchInicio[2]}`;
+              console.log(`✓ Hora de início encontrada: ${horaInicioDia}`);
+            }
+
+            // Procurar horário de almoço
+            const matchAlmoco = etiqueta.match(/(almoço|almoco)[:\s]+(\d{1,2}):(\d{2})/);
+            if (matchAlmoco) {
+              horaAlmoco = `${matchAlmoco[2]}:${matchAlmoco[3]}`;
+              console.log(`✓ Hora de almoço encontrada: ${horaAlmoco}`);
+            }
+          }
+
+          let horaAtual = horaInicioDia;
+          let jaPassouAlmoco = false;
+
+          // Segunda passagem: processar atividades
+          for (const linha of dados) {
+            const tarefa = linha['Entrada de tempo'];
+            const duracao = linha[data];
+            const etiqueta = (linha['Etiquetas'] || '').toLowerCase();
+
+            // REGRA 1: Pular se não tem duração neste dia específico ou é hífen
+            if (!duracao || duracao.trim() === '' || duracao === '-') {
+              continue;
+            }
+
+            // REGRA 2: Pular linhas que são apenas etiquetas (inicio/almoço) sem descrição de tarefa real
+            // Verificar se a tarefa tem formato válido DD - NN - Descrição
+            const temFormatoValido = tarefa.match(/^(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*.+/);
+
+            // Se tem etiqueta de controle (inicio/almoço) e NÃO tem formato de tarefa válido, pular
+            if ((etiqueta.includes('inicio') || etiqueta.includes('almoço') || etiqueta.includes('almoco')) && !temFormatoValido) {
+              console.log(`⚠️ Pulando linha de etiqueta sem tarefa válida: "${tarefa}"`);
+              continue;
+            }
+
+            // REGRA 3: Validar se a tarefa pertence ao dia correto pelo formato DD - NN - Descrição
+            const matchTarefa = tarefa.match(/^(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(.+)/);
+
+            if (matchTarefa) {
+              const diaTarefa = matchTarefa[1].padStart(2, '0');
+              const numeroTarefa = matchTarefa[2].padStart(2, '0');
+              const descricao = matchTarefa[3].trim();
+
+              // Verificar se o dia da tarefa corresponde ao dia da coluna
+              if (diaTarefa !== diaDoMes) {
+                console.log(`⚠️ Pulando tarefa "${tarefa}" - dia da tarefa ${diaTarefa} ≠ dia da coluna ${diaDoMes}`);
+                continue;
+              }
+
+              console.log(`✓ Tarefa válida: dia ${diaTarefa}, número ${numeroTarefa}, descrição "${descricao}"`);
+            } else {
+              console.log(`⚠️ Tarefa sem formato padrão DD - NN: "${tarefa}" - processando mesmo assim`);
+            }
+
+            // Converter duração para formato H:MM ou HH:MM:SS
+            let duracaoFormatada = duracao.trim();
+
+            // Se duração está em formato HH:MM:SS, converter para H:MM
+            if (duracaoFormatada.match(/^\d{2}:\d{2}:\d{2}$/)) {
+              const [h, m] = duracaoFormatada.split(':');
+              const horas = parseInt(h);
+              const minutos = parseInt(m);
+              duracaoFormatada = `${horas}:${minutos.toString().padStart(2, '0')}`;
+            }
+            // Se duração está em formato decimal (ex: 0.5, 1.25)
+            else if (duracao.includes('.') || duracao.includes(',')) {
+              const horas = parseFloat(duracao.replace(',', '.'));
+              const horasInt = Math.floor(horas);
+              const minutos = Math.round((horas - horasInt) * 60);
+              duracaoFormatada = `${horasInt}:${minutos.toString().padStart(2, '0')}`;
+            }
+            // Se duração não tem formato correto
+            else if (!duracaoFormatada.includes(':')) {
+              const horas = parseFloat(duracaoFormatada);
+              const horasInt = Math.floor(horas);
+              const minutos = Math.round((horas - horasInt) * 60);
+              duracaoFormatada = `${horasInt}:${minutos.toString().padStart(2, '0')}`;
+            }
+
+            const horaInicio = horaAtual;
+            const horaFim = calcularHoraFim(horaInicio, duracaoFormatada);
+
+            // Verificar se chegamos no horário de almoço
+            if (horaAlmoco && !jaPassouAlmoco) {
+              const fimMinutos = timeToMinutes(horaFim);
+              const almocoMinutos = timeToMinutes(horaAlmoco);
+
+              // Se a atividade termina no horário de almoço ou depois
+              if (fimMinutos >= almocoMinutos) {
+                // Ajustar o fim da atividade para o horário de almoço
+                const inicioMinutos = timeToMinutes(horaInicio);
+                const duracaoAteAlmoco = almocoMinutos - inicioMinutos;
+
+                if (duracaoAteAlmoco > 0) {
+                  const duracaoAjustada = minutesToTime(duracaoAteAlmoco);
+
+                  console.log(`  ⏰ ${tarefa}`);
+                  console.log(`     Início: ${horaInicio} | Fim: ${horaAlmoco} (ajustado para almoço) | Duração: ${duracaoAjustada}`);
+
+                  novasAtividades.push({
+                    data: data,
+                    inicio: horaInicio,
+                    duracao: duracaoAjustada,
+                    tarefa: tarefa || 'Sem descrição'
+                  });
+
+                  // Próxima atividade começa 1 hora depois do almoço
+                  horaAtual = minutesToTime(almocoMinutos + 60);
+                  jaPassouAlmoco = true;
+                  console.log(`  🍽️ Pausa para almoço às ${horaAlmoco}`);
+                  console.log(`  ⏩ Próxima atividade às ${horaAtual}`);
+                } else {
+                  // Se não há tempo antes do almoço, pular para depois do almoço
+                  horaAtual = minutesToTime(almocoMinutos + 60);
+                  jaPassouAlmoco = true;
+                  console.log(`  ⏩ Saltando para depois do almoço: ${horaAtual}`);
+                }
+
+                continue;
+              }
+            }
+
+            // Atividade normal
+            console.log(`  ✓ ${tarefa}`);
+            console.log(`     Início: ${horaInicio} | Fim: ${horaFim} | Duração: ${duracaoFormatada}`);
+
+            novasAtividades.push({
+              data: data,
+              inicio: horaInicio,
+              duracao: duracaoFormatada,
+              tarefa: tarefa || 'Sem descrição'
+            });
+
+            // Atualizar hora atual para próxima atividade
+            horaAtual = horaFim;
+          }
+        }
+      }
+
+      // Ordenar por data e hora
+      novasAtividades.sort((a, b) => {
+        if (a.data !== b.data) return a.data.localeCompare(b.data);
+        return a.inicio.localeCompare(b.inicio);
+      });
+
+      // Converter para formato final
+      const atividadesFormatadas: AtividadeFormatada[] = novasAtividades.map(item => ({
+        Colaborador: 'Eduardo Faller',
+        'Data Início': item.data,
+        'Hora inicio': item.inicio,
+        'Hora fim': calcularHoraFim(item.inicio, item.duracao),
+        'Tempo': item.duracao,
+        'Tarefa': item.tarefa
+      }));
+
+      setAtividades(prev => [...prev, ...atividadesFormatadas]);
+      setArquivosCarregados(prev => [...prev, ...nomesArquivos]);
+
+      if (atividadesFormatadas.length === 0) {
+        alert('Nenhuma atividade foi encontrada. Verifique o console (F12) para debug.');
+      } else {
+        alert(`✓ ${atividadesFormatadas.length} atividades extraídas com sucesso!`);
+      }
+
+    } catch (error) {
+      console.error('Erro ao processar Excel/CSV:', error);
+      alert('Erro ao processar os arquivos. Detalhes no console (F12).');
+    } finally {
+      setProcessando(false);
+    }
+  };
+
+  // Modificar o handleFileUpload para aceitar ambos os tipos
+  const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.target.files;
+    if (fileList && fileList.length > 0) {
+      const filesArray: File[] = Array.from(fileList);
+
+      // Verificar tipo de arquivo
+      const isPDF = filesArray.every(f => f.name.toLowerCase().endsWith('.pdf'));
+      const isCSV = filesArray.every(f =>
+        f.name.toLowerCase().endsWith('.csv') ||
+        f.name.toLowerCase().endsWith('.xlsx') ||
+        f.name.toLowerCase().endsWith('.xls')
+      );
+
+      if (isPDF) {
+        await processarPDFsTMetric(filesArray);
+      } else if (isCSV) {
+        await processarExcelTMetric(filesArray);
+      } else {
+        alert('Por favor, selecione apenas arquivos PDF ou CSV/Excel');
+      }
+    }
+    event.target.value = '';
+  };
+
+  // Limpar todas as atividades
+  const limparAtividades = () => {
+    setAtividades([]);
+    setArquivosCarregados([]);
+  };
+
+  // Carregar dados de exemplo
+  const carregarDadosExemplo = () => {
+    const exemplos: Atividade[] = [
+      { data: '2025-09-01', inicio: '8:00', duracao: '0:25', tarefa: '01 - 01 - Revisão tarefas do dia' },
+      { data: '2025-09-01', inicio: '8:25', duracao: '0:14', tarefa: '01 - 02 - Daily' },
+      { data: '2025-09-01', inicio: '8:39', duracao: '1:31', tarefa: '01 - 03 - Estudando tipagem no typescript' },
+      { data: '2025-09-01', inicio: '10:10', duracao: '1:30', tarefa: '01 - 04 - Refaturando, os retorno do normalizePagination, pesquisando maneira de tipagem' },
+      { data: '2025-09-01', inicio: '11:40', duracao: '0:30', tarefa: '01 - 05 - Merge Request #902' },
+      { data: '2025-09-02', inicio: '8:00', duracao: '0:05', tarefa: '02 - 01 - Resisão tarefas do dia' },
+      { data: '2025-09-02', inicio: '8:05', duracao: '0:55', tarefa: '02 - 02 - Verificando Bug com Pedro' },
+      { data: '2025-09-02', inicio: '9:00', duracao: '0:17', tarefa: '02 - 03 - Daily' },
+    ];
+
+    const atividadesFormatadas: AtividadeFormatada[] = exemplos.map(item => ({
+      Colaborador: 'Eduardo Faller',
+      'Data Início': item.data,
+      'Hora inicio': item.inicio,
+      'Hora fim': calcularHoraFim(item.inicio, item.duracao),
+      'Tempo': item.duracao,
+      'Tarefa': item.tarefa
+    }));
+
+    setAtividades(atividadesFormatadas);
+    setArquivosCarregados(['Dados de exemplo']);
+  };
+
+  // Função para alternar ordenação
+  const alternarOrdenacao = (coluna: OrdenacaoColuna) => {
+    if (colunaOrdenacao === coluna) {
+      // Se clicar na mesma coluna, inverte a direção
+      setDirecaoOrdenacao(direcaoOrdenacao === 'asc' ? 'desc' : 'asc');
+    } else {
+      // Se clicar em coluna diferente, define como ascendente
+      setColunaOrdenacao(coluna);
+      setDirecaoOrdenacao('asc');
+    }
+  };
+
+  const atividadesFiltradas = atividades.filter(ativ => {
+    const matchData = !filtroData || ativ['Data Início'].includes(filtroData);
+    const matchTarefa = !filtroTarefa || ativ.Tarefa.toLowerCase().includes(filtroTarefa.toLowerCase());
+    return matchData && matchTarefa;
+  });
+
+  // Aplicar ordenação
+  const atividadesOrdenadas = [...atividadesFiltradas].sort((a, b) => {
+    let comparacao = 0;
+
+    switch (colunaOrdenacao) {
+      case 'data':
+        comparacao = a['Data Início'].localeCompare(b['Data Início']);
+        break;
+      case 'hora':
+        comparacao = a['Hora inicio'].localeCompare(b['Hora inicio']);
+        break;
+      case 'tempo':
+        comparacao = timeToMinutes(a.Tempo) - timeToMinutes(b.Tempo);
+        break;
+      case 'tarefa':
+        comparacao = a.Tarefa.localeCompare(b.Tarefa);
+        break;
+      default:
+        comparacao = 0;
+    }
+
+    return direcaoOrdenacao === 'asc' ? comparacao : -comparacao;
+  });
+
+  const downloadCSV = () => {
+    const headers = ['Colaborador', 'Data Início', 'Hora inicio', 'Hora fim', 'Tempo', 'Tarefa'];
+
+    // Usar atividadesOrdenadas que contém TODAS as atividades (já filtradas e ordenadas)
+    const csvContent = [
+      headers.join(','),
+      ...atividadesOrdenadas.map(row =>
+        headers.map(header => `"${row[header as keyof AtividadeFormatada]}"`).join(',')
+      )
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+
+    // Obter mês atual para o nome do arquivo
+    const dataAtual = new Date();
+    const mesNome = dataAtual.toLocaleDateString('pt-BR', { month: 'long' });
+    link.download = `lancamento-${mesNome}.csv`;
+    link.click();
+  };
+
+  // Função para agrupar atividades por dia e extrair horários
+  const agruparAtividadesPorDia = () => {
+    const diasAgrupados: { [key: string]: AtividadeFormatada[] } = {};
+
+    atividadesOrdenadas.forEach(ativ => {
+      const data = ativ['Data Início'];
+      if (!diasAgrupados[data]) {
+        diasAgrupados[data] = [];
+      }
+      diasAgrupados[data].push(ativ);
+    });
+
+    return diasAgrupados;
+  };
+
+  // Função para exportar Excel com múltiplas abas usando ExcelJS
+  const downloadExcel = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const colaborador = atividadesOrdenadas[0]?.Colaborador || 'Eduardo Faller';
+    const periodoRef = new Date();
+
+    // Obter mês e ano das atividades
+    const primeiraData = atividadesOrdenadas[0]?.['Data Início'];
+    const [ano, mes] = primeiraData ? primeiraData.split('-') : [periodoRef.getFullYear(), periodoRef.getMonth() + 1];
+
+    // === ABA 1: ATIVIDADES (IGUAL AO CSV) ===
+    const wsAtividades = workbook.addWorksheet('Atividades');
+
+    // Cabeçalho
+    wsAtividades.getCell('A1').value = 'Lista de Atividades Completas';
+    wsAtividades.getCell('A1').font = { bold: true, size: 14, color: { argb: 'FF3B505A' } };
+    wsAtividades.mergeCells('A1:F1');
+
+    // Cabeçalho da tabela
+    const headerAtividades = wsAtividades.getRow(3);
+    headerAtividades.values = ['Colaborador', 'Data Início', 'Hora inicio', 'Hora fim', 'Tempo', 'Tarefa'];
+    headerAtividades.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerAtividades.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B505A' } };
+    headerAtividades.alignment = { vertical: 'middle', horizontal: 'left' };
+
+    // Aplicar bordas no cabeçalho
+    for (let col = 1; col <= 6; col++) {
+      wsAtividades.getCell(3, col).border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' }
+      };
+    }
+
+    // Adicionar TODAS as atividades ordenadas (mesmo dados do CSV)
+    atividadesOrdenadas.forEach((ativ, index) => {
+      const row = wsAtividades.getRow(4 + index);
+      row.values = [
+        ativ.Colaborador,
+        ativ['Data Início'],
+        ativ['Hora inicio'],
+        ativ['Hora fim'],
+        ativ.Tempo,
+        ativ.Tarefa
+      ];
+
+      // Formatação e bordas
+      for (let col = 1; col <= 6; col++) {
+        const cell = wsAtividades.getCell(4 + index, col);
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFD3D3D3' } },
+          left: { style: 'thin', color: { argb: 'FFD3D3D3' } },
+          bottom: { style: 'thin', color: { argb: 'FFD3D3D3' } },
+          right: { style: 'thin', color: { argb: 'FFD3D3D3' } }
+        };
+
+        // Zebrar linhas
+        if (index % 2 === 0) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF9E7' } };
+        }
+      }
+
+      // Formatar data
+      wsAtividades.getCell(`B${4 + index}`).value = new Date(ativ['Data Início'] + 'T00:00:00');
+      wsAtividades.getCell(`B${4 + index}`).numFmt = 'dd/mm/yyyy';
+    });
+
+    // Definir larguras de colunas
+    wsAtividades.getColumn('A').width = 20;
+    wsAtividades.getColumn('B').width = 15;
+    wsAtividades.getColumn('C').width = 12;
+    wsAtividades.getColumn('D').width = 12;
+    wsAtividades.getColumn('E').width = 10;
+    wsAtividades.getColumn('F').width = 60;
+
+    // === ABA 2: LANÇAMENTO DE HORAS ===
+    const wsLancamento = workbook.addWorksheet('Lancto Horas');
+
+    // Cabeçalhos informativos
+    wsLancamento.getCell('A1').value = 'Lançamento de Horas de Serviços';
+    wsLancamento.getCell('A1').font = { bold: true, size: 14, color: { argb: 'FF3B505A' } };
+
+    wsLancamento.getCell('A2').value = 'Periodo:';
+    wsLancamento.getCell('B2').value = `${mes}/${ano}`;
+    wsLancamento.getCell('A2').font = { bold: true };
+
+    wsLancamento.getCell('A3').value = 'Profissional:';
+    wsLancamento.getCell('B3').value = colaborador;
+    wsLancamento.getCell('A3').font = { bold: true };
+
+    wsLancamento.getCell('A4').value = 'Empresa:';
+    wsLancamento.getCell('B4').value = colaborador;
+    wsLancamento.getCell('A4').font = { bold: true };
+
+    // Cabeçalho da tabela (linhas 6 e 7)
+    const headerRow1 = wsLancamento.getRow(6);
+    headerRow1.values = ['', 'Data', 'Inicio', 'Fim', 'Total Horas', 'Local', '', 'Descrição Atividades', 'Abonar Reembolso', 'Final de Semana', 'Reembolso Km'];
+    headerRow1.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow1.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B505A' } };
+
+    const headerRow2 = wsLancamento.getRow(7);
+    headerRow2.values = ['', '', '', '', '', '#ID', 'Nome', '', '', '', ''];
+    headerRow2.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow2.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B505A' } };
+
+    // Mesclar células do cabeçalho
+    wsLancamento.mergeCells('B6:B7');
+    wsLancamento.mergeCells('C6:C7');
+    wsLancamento.mergeCells('D6:D7');
+    wsLancamento.mergeCells('E6:E7');
+    wsLancamento.mergeCells('F6:G6');
+    wsLancamento.mergeCells('H6:H7');
+    wsLancamento.mergeCells('I6:I7');
+    wsLancamento.mergeCells('J6:J7');
+    wsLancamento.mergeCells('K6:K7');
+
+    // Processar dados agrupados por dia
+    const diasAgrupados = agruparAtividadesPorDia();
+    let rowIndex = 8;
+
+    Object.keys(diasAgrupados).sort().forEach(data => {
+      const atividadesDoDia = diasAgrupados[data];
+      const dataFormatada = new Date(data + 'T00:00:00');
+      const diaSemana = dataFormatada.getDay();
+      const isFimDeSemana = diaSemana === 0 || diaSemana === 6;
+
+      if (isFimDeSemana || atividadesDoDia.length === 0) {
+        // Dia sem trabalho ou fim de semana
+        const row = wsLancamento.getRow(rowIndex);
+        row.values = ['', dataFormatada, '', '', '0:00', '', '', '', 'Não', isFimDeSemana ? 'Sim' : 'Não', 0];
+
+        wsLancamento.getCell(`B${rowIndex}`).numFmt = 'dd/mm/yy, ddd';
+        wsLancamento.getCell(`C${rowIndex}`).numFmt = 'h:mm';
+        wsLancamento.getCell(`D${rowIndex}`).numFmt = 'h:mm';
+        wsLancamento.getCell(`E${rowIndex}`).numFmt = 'h:mm';
+
+        rowIndex++;
+      } else {
+        // Extrair dia do mês da data (ex: 2025-09-01 -> 01)
+        const diaDoMes = data.split('-')[2];
+
+        // Procurar a primeira atividade do dia (ordem "01")
+        // Formato da tarefa: "DD - 01 - Descrição"
+        const primeiraAtividade = atividadesDoDia.find(ativ => {
+          const match = ativ.Tarefa.match(/^\d{2}\s*-\s*01\s*-/);
+          return match !== null;
+        }) || atividadesDoDia[0]; // Fallback para primeira do array
+
+        const inicioManha = primeiraAtividade['Hora inicio'];
+
+        // Encontrar fim da manhã (última atividade antes das 13:00)
+        let fimManha = '12:30'; // padrão
+        for (const ativ of atividadesDoDia) {
+          const horaFimMinutos = timeToMinutes(ativ['Hora fim']);
+          if (horaFimMinutos <= 13 * 60) {
+            fimManha = ativ['Hora fim'];
+          } else {
+            break;
+          }
+        }
+
+        const row1 = wsLancamento.getRow(rowIndex);
+        row1.values = ['', dataFormatada, inicioManha, fimManha, { formula: `D${rowIndex}-C${rowIndex}` }, '', '', '', 'Não', 'Não', 0];
+
+        wsLancamento.getCell(`B${rowIndex}`).numFmt = 'dd/mm/yy, ddd';
+        wsLancamento.getCell(`C${rowIndex}`).value = timeToMinutes(inicioManha) / (24 * 60);
+        wsLancamento.getCell(`C${rowIndex}`).numFmt = 'h:mm';
+        wsLancamento.getCell(`D${rowIndex}`).value = timeToMinutes(fimManha) / (24 * 60);
+        wsLancamento.getCell(`D${rowIndex}`).numFmt = 'h:mm';
+        wsLancamento.getCell(`E${rowIndex}`).numFmt = 'h:mm';
+
+        rowIndex++;
+
+        // Período da tarde
+        const atividadesTarde = atividadesDoDia.filter(a => timeToMinutes(a['Hora inicio']) >= 13 * 60);
+        if (atividadesTarde.length > 0) {
+          const inicioTarde = atividadesTarde[0]['Hora inicio'];
+          const ultimaAtiv = atividadesTarde[atividadesTarde.length - 1];
+          const fimTarde = ultimaAtiv['Hora fim'];
+
+          const row2 = wsLancamento.getRow(rowIndex);
+          row2.values = ['', dataFormatada, inicioTarde, fimTarde, { formula: `D${rowIndex}-C${rowIndex}` }, '', '', '', 'Não', 'Não', 0];
+
+          wsLancamento.getCell(`B${rowIndex}`).numFmt = 'dd/mm/yy, ddd';
+          wsLancamento.getCell(`C${rowIndex}`).value = timeToMinutes(inicioTarde) / (24 * 60);
+          wsLancamento.getCell(`C${rowIndex}`).numFmt = 'h:mm';
+          wsLancamento.getCell(`D${rowIndex}`).value = timeToMinutes(fimTarde) / (24 * 60);
+          wsLancamento.getCell(`D${rowIndex}`).numFmt = 'h:mm';
+          wsLancamento.getCell(`E${rowIndex}`).numFmt = 'h:mm';
+
+          rowIndex++;
+        }
+      }
+    });
+
+    // Definir larguras de colunas
+    wsLancamento.getColumn('B').width = 18;
+    wsLancamento.getColumn('C').width = 10;
+    wsLancamento.getColumn('D').width = 10;
+    wsLancamento.getColumn('E').width = 12;
+    wsLancamento.getColumn('F').width = 8;
+    wsLancamento.getColumn('G').width = 20;
+    wsLancamento.getColumn('H').width = 30;
+    wsLancamento.getColumn('I').width = 18;
+    wsLancamento.getColumn('J').width = 16;
+    wsLancamento.getColumn('K').width = 15;
+
+    // === ABA 3: RESUMO FINANCEIRO ===
+    const wsResumo = workbook.addWorksheet('Resumo Financeiro');
+
+    wsResumo.getCell('A1').value = 'Resumo Financeiro Pagamento Serviços';
+    wsResumo.getCell('A1').font = { bold: true, size: 14, color: { argb: 'FF3B505A' } };
+
+    wsResumo.getCell('A2').value = 'Periodo:';
+    wsResumo.getCell('B2').value = `${mes}/${ano}`;
+    wsResumo.getCell('A2').font = { bold: true };
+
+    wsResumo.getCell('A3').value = 'Profissional:';
+    wsResumo.getCell('B3').value = colaborador;
+    wsResumo.getCell('A3').font = { bold: true };
+
+    wsResumo.getCell('A4').value = 'Empresa:';
+    wsResumo.getCell('B4').value = colaborador;
+    wsResumo.getCell('A4').font = { bold: true };
+
+    // Cálculos
+    const ultimaLinha = rowIndex - 1;
+
+    wsResumo.getCell('B9').value = 'Pagamento Horas Serviço';
+    wsResumo.getCell('B9').font = { bold: true, size: 12 };
+
+    wsResumo.getCell('B10').value = 'Valor/Hora do Contrato';
+    wsResumo.getCell('C10').value = 0; // Valor padrão
+    wsResumo.getCell('C10').numFmt = 'R$ #,##0.00';
+    wsResumo.getCell('B10').font = { bold: true };
+
+    wsResumo.getCell('B11').value = 'Qtd Total Horas/Homem';
+    wsResumo.getCell('C11').value = { formula: `ROUND(SUM('Lancto Horas'!E8:E${ultimaLinha})*24,2)` };
+    wsResumo.getCell('C11').numFmt = '#,##0.00';
+    wsResumo.getCell('B11').font = { bold: true };
+
+    wsResumo.getCell('B12').value = 'Vlr Total Horas/Homem';
+    wsResumo.getCell('C12').value = { formula: 'C11*C10' };
+    wsResumo.getCell('C12').numFmt = 'R$ #,##0.00';
+    wsResumo.getCell('B12').font = { bold: true };
+
+    // Estilização
+    wsResumo.getCell('C10').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF9E7' } };
+    wsResumo.getCell('C11').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF9E7' } };
+    wsResumo.getCell('C12').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF4B942' } };
+    wsResumo.getCell('C12').font = { bold: true };
+
+    wsResumo.getColumn('B').width = 30;
+    wsResumo.getColumn('C').width = 20;
+
+    // Gerar e baixar o arquivo
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+
+    const mesNome = new Date(parseInt(String(ano)), parseInt(String(mes)) - 1).toLocaleDateString('pt-BR', { month: 'long' });
+    link.download = `lancamento-${mesNome}-${String(ano)}.xlsx`;
+    link.click();
+  };
+
+  // Componente para ícone de ordenação
+  const IconeOrdenacao = ({ coluna }: { coluna: OrdenacaoColuna }) => {
+    if (colunaOrdenacao !== coluna) {
+      return <ArrowUpDown size={14} className="opacity-50" />;
+    }
+    return direcaoOrdenacao === 'asc' ?
+      <ArrowUp size={14} className="text-geocapex-yellow" /> :
+      <ArrowDown size={14} className="text-geocapex-yellow" />;
+  };
+
+  // Estatísticas
+  const totalHoras = atividadesOrdenadas.reduce((acc, item) => {
+    const minutos = timeToMinutes(item.Tempo);
+    return acc + minutos;
+  }, 0);
+
+  const datasUnicas = [...new Set(atividadesOrdenadas.map(a => a['Data Início']))];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br p-8 font-baloo">
+      <div className="max-w-7xl mx-auto">
+        {/* Modal de Ajuda */}
+        {mostrarModalAjuda && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+              <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between">
+                <h2 className="text-2xl font-bold text-geocapex-dark flex items-center gap-2">
+                  <HelpCircle className="text-geocapex-orange" size={28} />
+                  Como formatar no TMetric
+                </h2>
+                <button
+                  onClick={() => setMostrarModalAjuda(false)}
+                  className="text-gray-500 hover:text-geocapex-dark transition-colors"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="p-6">
+                <div className="mb-4 bg-yellow-50 border border-geocapex-yellow rounded-lg p-4">
+                  <h3 className="font-semibold text-geocapex-dark mb-2">📋 Formato das tarefas:</h3>
+                  <p className="text-sm text-geocapex-dark mb-2">
+                    As tarefas devem seguir o padrão: <code className="bg-white px-2 py-1 rounded">DD - NN - Descrição</code>
+                  </p>
+                  <ul className="text-sm text-geocapex-dark list-disc list-inside space-y-1">
+                    <li><strong>DD</strong> = Dia do mês (01, 02, 03...)</li>
+                    <li><strong>NN</strong> = Número sequencial da tarefa no dia (01, 02, 03...)</li>
+                    <li><strong>Descrição</strong> = Descrição da atividade realizada</li>
+                  </ul>
+                  <p className="text-sm text-geocapex-dark mt-3">
+                    <strong>Exemplo:</strong> <code className="bg-white px-2 py-1 rounded">01 - 01 - Revisão tarefas do dia</code>
+                  </p>
+                </div>
+
+                <div className="mb-4 bg-orange-50 border border-geocapex-orange rounded-lg p-4">
+                  <h3 className="font-semibold text-geocapex-dark mb-2">🏷️ Etiquetas especiais (CSV/Excel):</h3>
+                  <ul className="text-sm text-geocapex-dark list-disc list-inside space-y-1">
+                    <li><strong>inicio: HH:MM</strong> - Define horário de início do dia (padrão: 8:00)</li>
+                    <li><strong>almoço: HH:MM</strong> - Define horário de pausa para almoço (1h)</li>
+                  </ul>
+                  <p className="text-sm text-geocapex-dark mt-2">
+                    <strong>Exemplo de etiqueta:</strong> <code className="bg-white px-2 py-1 rounded">inicio: 9:00</code>
+                  </p>
+                </div>
+
+                <div className="border-2 border-geocapex-yellow rounded-lg overflow-hidden">
+                  <div className="bg-geocapex-dark text-white p-3 font-semibold">
+                    📸 Exemplo visual do TMetric
+                  </div>
+                  <img
+                    src="/docs/exemploTmetric.png"
+                    alt="Exemplo de formatação no TMetric"
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Header */}
+        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-3xl font-bold text-geocapex-dark flex items-center gap-3">
+                <Calendar className="text-geocapex-orange" size={32} />
+                Planilha de Atividades
+              </h1>
+              <p className="text-geocapex-dark mt-2 flex items-center gap-2">
+                <User size={18} />
+                Eduardo Faller
+              </p>
+            </div>
+            <button
+              onClick={() => setMostrarModalAjuda(true)}
+              className="bg-geocapex-yellow hover:bg-yellow-500 text-geocapex-dark px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-md font-semibold"
+            >
+              <HelpCircle size={20} />
+              Como usar
+            </button>
+          </div>
+
+          {/* Upload de Arquivos */}
+          <div className="border-2 border-dashed border-geocapex-yellow rounded-lg p-6 mb-4 bg-yellow-50">
+            <div className="text-center">
+              <Upload className="mx-auto text-geocapex-orange mb-3" size={40} />
+              <h3 className="text-lg font-semibold text-geocapex-dark mb-2">
+                Importar PDFs ou Excel/CSV do TMetric
+              </h3>
+              <p className="text-sm text-geocapex-dark mb-4">
+                Faça upload dos relatórios em PDF ou Excel/CSV do TMetric
+              </p>
+
+              <div className="flex gap-3 justify-center">
+                <label className="bg-geocapex-orange hover:bg-orange-600 text-white px-6 py-3 rounded-lg cursor-pointer flex items-center gap-2 transition-colors shadow-md">
+                  <FileText size={20} />
+                  Selecionar PDFs
+                  <input
+                    type="file"
+                    multiple
+                    accept=".pdf,.csv,.xlsx,.xls"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={processando}
+                  />
+                </label>
+
+                <button
+                  onClick={carregarDadosExemplo}
+                  className="bg-geocapex-yellow hover:bg-yellow-500 text-geocapex-dark px-6 py-3 rounded-lg flex items-center gap-2 transition-colors shadow-md font-semibold"
+                  disabled={processando}
+                >
+                  Carregar Exemplo
+                </button>
+
+                {atividades.length > 0 && (
+                  <button
+                    onClick={limparAtividades}
+                    className="bg-geocapex-dark hover:bg-gray-700 text-white px-6 py-3 rounded-lg flex items-center gap-2 transition-colors shadow-md"
+                  >
+                    <Trash2 size={20} />
+                    Limpar
+                  </button>
+                )}
+              </div>
+
+              {processando && (
+                <div className="mt-4 text-geocapex-orange font-medium">
+                  Processando arquivos...
+                </div>
+              )}
+
+              {arquivosCarregados.length > 0 && (
+                <div className="mt-4 text-sm text-geocapex-dark">
+                  <strong>Arquivos carregados:</strong> {arquivosCarregados.join(', ')}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Estatísticas */}
+          {atividades.length > 0 && (
+            <>
+              <div className="grid grid-cols-3 gap-4 mb-6">
+                <div className="bg-yellow-50 p-4 rounded-lg border border-geocapex-yellow">
+                  <div className="text-geocapex-orange text-sm font-semibold">Total de Atividades</div>
+                  <div className="text-2xl font-bold text-geocapex-dark">{atividadesFiltradas.length}</div>
+                </div>
+                <div className="bg-orange-50 p-4 rounded-lg border border-geocapex-orange">
+                  <div className="text-geocapex-orange text-sm font-semibold">Total de Horas</div>
+                  <div className="text-2xl font-bold text-geocapex-dark">{minutesToTime(totalHoras)}h</div>
+                </div>
+                <div className="bg-gray-50 p-4 rounded-lg border border-geocapex-dark">
+                  <div className="text-geocapex-dark text-sm font-semibold">Dias Trabalhados</div>
+                  <div className="text-2xl font-bold text-geocapex-dark">{datasUnicas.length}</div>
+                </div>
+              </div>
+
+              {/* Filtros */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-geocapex-dark mb-2">
+                    Filtrar por Data
+                  </label>
+                  <input
+                    type="date"
+                    value={filtroData}
+                    onChange={(e) => setFiltroData(e.target.value)}
+                    className="w-full px-4 py-2 border border-geocapex-yellow rounded-lg focus:ring-2 focus:ring-geocapex-orange focus:border-transparent"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-geocapex-dark mb-2">
+                    Buscar Tarefa
+                  </label>
+                  <input
+                    type="text"
+                    value={filtroTarefa}
+                    onChange={(e) => setFiltroTarefa(e.target.value)}
+                    placeholder="Digite para buscar..."
+                    className="w-full px-4 py-2 border border-geocapex-yellow rounded-lg focus:ring-2 focus:ring-geocapex-orange focus:border-transparent"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-geocapex-dark mb-2">
+                    Downloads
+                  </label>
+                  <button
+                    onClick={downloadExcel}
+                    disabled={atividadesOrdenadas.length === 0}
+                    className="w-full bg-geocapex-orange hover:bg-orange-600 disabled:bg-gray-400 text-white px-6 py-2 rounded-lg flex items-center justify-center gap-2 transition-colors shadow-md"
+                    // className="w-full bg-geocapex-yellow hover:bg-yellow-500 disabled:bg-gray-400 text-geocapex-dark px-6 py-2 rounded-lg flex items-center justify-center gap-2 transition-colors shadow-md font-semibold"
+                  >
+                    <Download size={20} />
+                    Baixar Excel
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Tabela */}
+        {atividades.length > 0 ? (
+          <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+            <div className="overflow-x-auto" style={{ maxHeight: '600px' }}>
+              <table className="w-full">
+                <thead className="bg-geocapex-dark text-white sticky top-0">
+                  <tr>
+                    <th
+                      className="px-4 py-3 text-left text-sm font-semibold cursor-pointer hover:bg-gray-700 transition-colors select-none"
+                      onClick={() => alternarOrdenacao('data')}
+                    >
+                      <div className="flex items-center gap-2">
+                        Data
+                        <IconeOrdenacao coluna="data" />
+                      </div>
+                    </th>
+                    <th
+                      className="px-4 py-3 text-left text-sm font-semibold cursor-pointer hover:bg-gray-700 transition-colors select-none"
+                      onClick={() => alternarOrdenacao('hora')}
+                    >
+                      <div className="flex items-center gap-2">
+                        Hora Início
+                        <IconeOrdenacao coluna="hora" />
+                      </div>
+                    </th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold">Hora Fim</th>
+                    <th
+                      className="px-4 py-3 text-left text-sm font-semibold cursor-pointer hover:bg-gray-700 transition-colors select-none"
+                      onClick={() => alternarOrdenacao('tempo')}
+                    >
+                      <div className="flex items-center gap-2">
+                        Tempo
+                        <IconeOrdenacao coluna="tempo" />
+                      </div>
+                    </th>
+                    <th
+                      className="px-4 py-3 text-left text-sm font-semibold cursor-pointer hover:bg-gray-700 transition-colors select-none"
+                      onClick={() => alternarOrdenacao('tarefa')}
+                    >
+                      <div className="flex items-center gap-2">
+                        Tarefa
+                        <IconeOrdenacao coluna="tarefa" />
+                      </div>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {atividadesOrdenadas.map((ativ, idx) => (
+                    <tr key={idx} className="hover:bg-yellow-50 transition-colors">
+                      <td className="px-4 py-3 text-sm text-geocapex-dark">
+                        {new Date(ativ['Data Início'] + 'T00:00:00').toLocaleDateString('pt-BR')}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-geocapex-dark">{ativ['Hora inicio']}</td>
+                      <td className="px-4 py-3 text-sm text-geocapex-dark">{ativ['Hora fim']}</td>
+                      <td className="px-4 py-3 text-sm font-medium text-geocapex-orange flex items-center gap-1">
+                        <Clock size={14} />
+                        {ativ.Tempo}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-geocapex-dark text-left">{ativ.Tarefa}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg shadow-lg p-12 text-center">
+            <FileText className="mx-auto text-geocapex-yellow mb-4" size={64} />
+            <h3 className="text-xl font-semibold text-geocapex-dark mb-2">
+              Nenhuma atividade carregada
+            </h3>
+            <p className="text-geocapex-dark">
+              Faça upload dos PDFs do TMetric ou carregue dados de exemplo para começar
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default ActivitiesListed;
