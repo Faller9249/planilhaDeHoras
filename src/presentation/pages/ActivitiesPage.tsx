@@ -509,9 +509,9 @@ const ActivitiesPage = () => {
                         </td>
                         <td className="px-4 py-3 text-sm text-geocapex-dark text-left">
                           <div className="flex items-center gap-2">
-                            {activity.hasValidationIssues && (
-                              <AlertTriangle className="text-yellow-600 flex-shrink-0" size={16} title={activity.validationWarnings.join(', ')} />
-                            )}
+                            <div title={activity.validationWarnings.join(', ')}>
+                              <AlertTriangle className="text-yellow-600 flex-shrink-0" size={16} />
+                            </div>
                             <span>{activity.task}</span>
                           </div>
                         </td>
