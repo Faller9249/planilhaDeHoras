@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Save, Clock, Plus } from 'lucide-react';
+import { X, Save, Plus } from 'lucide-react';
 import { Activity } from '../../domain/entities/Activity';
 
 interface ActivityAddModalProps {
